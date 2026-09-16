@@ -82,8 +82,9 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 
 ### Failure and rollback
 
-- A refusal **before** the agent is stopped leaves the durable record and the instructions byte-identical.
+- On the ordinary same-endpoint path, a refusal **before** the agent is stopped leaves the durable record and the instructions byte-identical.
 - A launch failure **before the replacement record is published** restores the prior durable record, keeps the progress note so a later recovery still has it, marks the journal `failed:launching`, and reports plainly that no agent is running and where the work is preserved.
+- During missing-endpoint recovery, the old endpoint is already missing or a confirmed husk; if the replacement fails before publication, abort cleanup removes only the new pane and leaves the prior record pointing at the old endpoint, so a later recovery retry is required.
 - If the launch owner already published the new record but no running agent can be confirmed, the new record is kept: the task is recorded on the new harness with no agent confirmed, which is exactly what recovery reconciles.
   Rewriting it back to the old harness would be a second, worse inaccuracy.
 
