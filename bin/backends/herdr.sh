@@ -2065,6 +2065,16 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
   [ "$presence" = dead ]
 }
 
+fm_backend_herdr_recovery_reserve_pane() {  # <session> <pane_id>
+  fm_backend_herdr_cli "$1" pane report-agent "$2" \
+    --source firstmate-recovery --agent firstmate-recovery --state idle >/dev/null 2>&1
+}
+
+fm_backend_herdr_recovery_release_pane() {  # <session> <pane_id>
+  fm_backend_herdr_cli "$1" pane release-agent "$2" \
+    --source firstmate-recovery --agent firstmate-recovery >/dev/null 2>&1
+}
+
 # fm_backend_herdr_pane_process_state: what the operating system says is
 # running in <pane_id>, as one of agent|shell|other|unreadable, from `pane
 # process-info` plus the real process table. This is the process-level proof
@@ -2446,7 +2456,16 @@ EOF
         fm_backend_herdr_create_task_cleanup "$session" "$pane_id"
         return 1
       fi
-      fm_backend_herdr_cli "$session" tab close "$dup" >/dev/null 2>&1 || true
+      if ! fm_backend_herdr_recovery_reserve_pane "$session" "$dup_pane"; then
+        echo "error: could not reserve herdr tab '$label' before retiring it in workspace $wsid (session $session)" >&2
+        fm_backend_herdr_create_task_cleanup "$session" "$pane_id"
+        return 1
+      fi
+      if ! fm_backend_herdr_cli "$session" tab close "$dup" >/dev/null 2>&1; then
+        fm_backend_herdr_recovery_release_pane "$session" "$dup_pane" || true
+        fm_backend_herdr_create_task_cleanup "$session" "$pane_id"
+        return 1
+      fi
     done <<EOF
 $dup_tab_ids
 EOF

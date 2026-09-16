@@ -3059,6 +3059,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
             "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_RECOVERY_OLD_TAB_ID")
           [ "$old_pane" = "$HERDR_RECOVERY_OLD_PANE_ID" ] || return 1
           fm_backend_herdr_tab_is_husk "$HERDR_SES" "$old_pane" || return 1
+          fm_backend_herdr_recovery_reserve_pane "$HERDR_SES" "$old_pane" || return 1
           fm_backend_herdr_cli "$HERDR_SES" tab close "$HERDR_RECOVERY_OLD_TAB_ID" >/dev/null 2>&1 || return 1
           old_tabs=$(fm_backend_herdr_cli "$HERDR_SES" tab list --workspace "$HERDR_WORKSPACE_ID" 2>/dev/null) || return 1
           ! printf '%s' "$old_tabs" | jq -e --arg tab "$HERDR_RECOVERY_OLD_TAB_ID" \
@@ -3115,6 +3116,7 @@ EOF
     HERDR_RECOVERY_ABORT_CLEANUP=1
     HERDR_RECOVERY_ABORT_SESSION=$HERDR_SES
     HERDR_RECOVERY_ABORT_PANE=$HERDR_PANE_ID
+    fm_backend_herdr_recovery_reserve_pane "$HERDR_SES" "$HERDR_PANE_ID" || exit 1
     herdr_recovery_endpoint_recheck || exit 1
     herdr_recovery_retire_old_husk || exit 1
     T="$HERDR_SES:$HERDR_PANE_ID"
