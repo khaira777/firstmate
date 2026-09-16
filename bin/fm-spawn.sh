@@ -3022,8 +3022,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
     }
     HERDR_SES=$(fm_meta_get "$RELAUNCH_META" herdr_session)
     HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
-    HERDR_TAB_ID=
-    HERDR_PANE_ID=
+    HERDR_RECOVERY_OLD_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
+    HERDR_RECOVERY_OLD_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
     [ -n "$HERDR_SES" ] && [ -n "$HERDR_WORKSPACE_ID" ] || {
       echo "error: task $ID has incomplete Herdr recovery identity; preserving its record" >&2
       exit 1
@@ -3041,6 +3041,29 @@ if [ "$RELAUNCH" -eq 1 ]; then
           ;;
       esac
       return 1
+    }
+    herdr_recovery_retire_old_husk() {
+      local old_state old_tabs
+      [ -n "$HERDR_RECOVERY_OLD_PANE_ID" ] || return 0
+      old_state=$(fm_backend_herdr_pane_agent_state "$HERDR_SES" "$HERDR_RECOVERY_OLD_PANE_ID")
+      case "$old_state" in
+        dead) return 0 ;;
+        no-agent)
+          [ -n "$HERDR_RECOVERY_OLD_TAB_ID" ] || return 1
+          fm_backend_herdr_cli "$HERDR_SES" tab close "$HERDR_RECOVERY_OLD_TAB_ID" >/dev/null 2>&1 || return 1
+          old_tabs=$(fm_backend_herdr_cli "$HERDR_SES" tab list --workspace "$HERDR_WORKSPACE_ID" 2>/dev/null) || return 1
+          ! printf '%s' "$old_tabs" | jq -e --arg tab "$HERDR_RECOVERY_OLD_TAB_ID" \
+            '.result.tabs[]? | select(.tab_id == $tab)' >/dev/null 2>&1
+          ;;
+        *)
+          echo "error: task $ID's prior Herdr endpoint became '$old_state' while retiring the recovery husk; refusing to close it" >&2
+          return 1
+          ;;
+      esac
+    }
+    fm_backend_herdr_server_ensure "$HERDR_SES" || {
+      echo "error: task $ID's Herdr recovery could not start its recorded session; preserving its record" >&2
+      exit 1
     }
     spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
       echo "error: task $ID's Herdr recovery could not acquire its session lock; refusing a concurrent recovery" >&2
@@ -3083,6 +3106,8 @@ EOF
     HERDR_RECOVERY_ABORT_CLEANUP=1
     HERDR_RECOVERY_ABORT_SESSION=$HERDR_SES
     HERDR_RECOVERY_ABORT_PANE=$HERDR_PANE_ID
+    herdr_recovery_endpoint_recheck || exit 1
+    herdr_recovery_retire_old_husk || exit 1
     T="$HERDR_SES:$HERDR_PANE_ID"
     WT_TARGET="$T"
   fi

@@ -2440,6 +2440,12 @@ EOF
   if [ -n "$dup_tab_ids" ]; then
     while IFS= read -r dup; do
       [ -n "$dup" ] || continue
+      dup_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$dup")
+      if [ -n "$dup_pane" ] && ! fm_backend_herdr_tab_is_husk "$session" "$dup_pane"; then
+        echo "error: herdr tab '$label' became live while replacing it in workspace $wsid (session $session)" >&2
+        fm_backend_herdr_create_task_cleanup "$session" "$pane_id"
+        return 1
+      fi
       fm_backend_herdr_cli "$session" tab close "$dup" >/dev/null 2>&1 || true
     done <<EOF
 $dup_tab_ids
