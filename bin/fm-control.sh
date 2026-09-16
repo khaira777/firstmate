@@ -334,6 +334,11 @@ agent_state() {
   fm_backend_agent_state "$BACKEND" "$T"
 }
 
+herdr_endpoint_detail_state() {
+  fm_backend_herdr_parse_target "$T" || { printf 'unknown'; return 0; }
+  fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
+}
+
 busy_verdict() {
   fm_busy_classify_meta "$META" "$ID" "$STATE"
 }
@@ -827,7 +832,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line recover_missing=0
+  local exit_result state note_line recover_missing=0 published_endpoint
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -874,7 +879,7 @@ do_relaunch() {
       if [ "$BACKEND" = herdr ] && [ "$state" = missing ]; then
         recover_missing=1
       elif [ "$BACKEND" = herdr ] && [ "$state" = dead ] && [ -f "$RECOVERY_ATTEMPT_MARKER" ]; then
-        recover_missing=1
+        [ "$(herdr_endpoint_detail_state)" != stale-agent ] && recover_missing=1
       fi
       ;;
   esac
@@ -887,6 +892,10 @@ do_relaunch() {
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
   state=$(agent_state)
+  if [ "$recover_missing" = 1 ] && [ "$BACKEND" = herdr ] \
+     && [ "$(herdr_endpoint_detail_state)" = stale-agent ]; then
+    recover_missing=0
+  fi
   if [ "$recover_missing" = 1 ]; then
     case "$state" in
       missing) exit_result=missing-endpoint ;;
@@ -923,6 +932,10 @@ do_relaunch() {
   else
     [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ] \
       || RELAUNCH_META_PUBLISHED=1
+    if [ "$RELAUNCH_META_PUBLISHED" = 1 ]; then
+      published_endpoint=$(fm_meta_get "$META" window)
+      [ -z "$published_endpoint" ] || T=$published_endpoint
+    fi
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 

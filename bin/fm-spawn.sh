@@ -3043,13 +3043,22 @@ if [ "$RELAUNCH" -eq 1 ]; then
       return 1
     }
     herdr_recovery_retire_old_husk() {
-      local old_state old_tabs
+      local old_state old_tabs old_pane old_tab_present
       [ -n "$HERDR_RECOVERY_OLD_PANE_ID" ] || return 0
       old_state=$(fm_backend_herdr_pane_agent_state "$HERDR_SES" "$HERDR_RECOVERY_OLD_PANE_ID")
       case "$old_state" in
         dead) return 0 ;;
         no-agent)
           [ -n "$HERDR_RECOVERY_OLD_TAB_ID" ] || return 1
+          old_tabs=$(fm_backend_herdr_cli "$HERDR_SES" tab list --workspace "$HERDR_WORKSPACE_ID" 2>/dev/null) || return 1
+          printf '%s' "$old_tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || return 1
+          old_tab_present=$(printf '%s' "$old_tabs" | jq -e --arg tab "$HERDR_RECOVERY_OLD_TAB_ID" \
+            '.result.tabs[]? | select(.tab_id == $tab)' >/dev/null 2>&1; printf '%s' "$?")
+          [ "$old_tab_present" = 0 ] || return 0
+          old_pane=$(fm_backend_herdr_pane_for_tab \
+            "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_RECOVERY_OLD_TAB_ID")
+          [ "$old_pane" = "$HERDR_RECOVERY_OLD_PANE_ID" ] || return 1
+          fm_backend_herdr_tab_is_husk "$HERDR_SES" "$old_pane" || return 1
           fm_backend_herdr_cli "$HERDR_SES" tab close "$HERDR_RECOVERY_OLD_TAB_ID" >/dev/null 2>&1 || return 1
           old_tabs=$(fm_backend_herdr_cli "$HERDR_SES" tab list --workspace "$HERDR_WORKSPACE_ID" 2>/dev/null) || return 1
           ! printf '%s' "$old_tabs" | jq -e --arg tab "$HERDR_RECOVERY_OLD_TAB_ID" \
@@ -3599,6 +3608,7 @@ agy_spawn_fail() {  # <detail>
 }
 
 if [ "$RELAUNCH" -eq 1 ] && [ "$RECOVER_MISSING" -eq 1 ]; then
+  herdr_recovery_endpoint_recheck || exit 1
   # A replacement Herdr tab inherits the provider's current shell directory,
   # which is not authoritative. Move that agent-free shell into the recorded
   # copy explicitly, then prove the foreground cwd before launching the agent.
