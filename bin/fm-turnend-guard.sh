@@ -107,11 +107,13 @@ case "$SYNC_WAIT_MS" in ''|*[!0-9]*) SYNC_WAIT_MS=800 ;; esac
 case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 
+AGY_MODE=0
 for arg in "$@"; do
   case "$arg" in
     --claude) CLAUDE_MODE=1 ;;
     --cursor) CURSOR_MODE=1 ;;
-    *) echo "usage: $(basename "$0") [--claude|--cursor]" >&2; exit 2 ;;
+    --agy) AGY_MODE=1 ;;
+    *) echo "usage: $(basename "$0") [--claude|--cursor|--agy]" >&2; exit 2 ;;
   esac
 done
 
@@ -164,7 +166,7 @@ command -v jq >/dev/null 2>&1 || exit 0
 # which calls this guard back with --cursor. Without that flag a Cursor-delivered
 # payload is the Claude-compatibility duplicate and must not create a second
 # continuation path (docs/turnend-guard.md "Harness integrations").
-if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
+if [ "$CURSOR_MODE" -eq 0 ] && [ "$AGY_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
   exit 0
 fi
 

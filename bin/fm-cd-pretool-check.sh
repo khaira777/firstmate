@@ -44,20 +44,20 @@ CMD=""
 CMD_SET=0
 CLAUDE_MODE=0
 CURSOR_MODE=0
+AGY_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-cd-pretool-check.sh [--command <cmd>] [--claude|--cursor]
+Usage: fm-cd-pretool-check.sh [--command <cmd>] [--claude|--cursor|--agy]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
-toolInput.command, or Claude/Codex tool_input.command).
+toolInput.command, Antigravity toolCall.args.CommandLine, or Claude/Codex tool_input.command).
 Fires only in the real primary firstmate checkout; it is a silent no-op in a
 crewmate/scout task worktree or any non-firstmate repo.
 Exits 0 to allow and 2 to deny a persistent top-level cwd change.
-The deny reason is written to stderr, with a Grok decision object on stdout
+The deny reason is written to stderr, with a Grok/Antigravity decision object on stdout
 unless --claude is supplied.
-With --cursor, a deny is Cursor's own decision object on stdout and exit 0,
-because Cursor reads the returned object rather than the exit status.
+With --cursor or --agy, a deny produces that harness's decision object on stdout and exits 0.
 Malformed transport and an unavailable classifier runtime fail open.
 EOF
 }
@@ -83,6 +83,10 @@ while [ "$#" -gt 0 ]; do
       CURSOR_MODE=1
       shift
       ;;
+    --agy)
+      AGY_MODE=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -104,10 +108,10 @@ if [ "$CMD_SET" -eq 0 ]; then
   # Cursor's own registration passes --cursor. Without it a Cursor-delivered
   # payload is the Claude-settings duplicate Cursor also loads, already
   # evaluated by that registration, so this copy allows without re-classifying.
-  if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
+  if [ "$CURSOR_MODE" -eq 0 ] && [ "$AGY_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
     exit 0
   fi
-  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
+  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolCall.args.CommandLine // .toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
 fi
 
 [ -n "$CMD" ] || exit 0
@@ -183,6 +187,10 @@ DETAIL="[$CODE] $REASON"
 ESCAPED=$(json_escape "$DETAIL")
 if [ "$CURSOR_MODE" -eq 1 ]; then
   printf '{"permission":"deny","user_message":"%s"}\n' "$ESCAPED"
+  exit 0
+fi
+if [ "$AGY_MODE" -eq 1 ]; then
+  printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
   exit 0
 fi
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2

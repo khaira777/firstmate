@@ -150,8 +150,7 @@ test_agy_control_mechanics_are_the_verified_ones() {
   [ "$(fm_control_harness_family agy)" = agy ] || fail "agy must map to its own family"
   fm_control_harness_supports_kind agy scout || fail "agy must run scouts"
   fm_control_harness_supports_kind agy ship || fail "agy must run ships"
-  fm_control_harness_supports_kind agy secondmate \
-    && fail "agy must refuse secondmates" || true
+  fm_control_harness_supports_kind agy secondmate || fail "agy must support secondmates"
   [ "$(fm_control_interrupt_key agy)" = Escape ] || fail "agy must interrupt on Escape"
   [ "$(fm_control_interrupt_repeat agy)" = 1 ] || fail "agy must interrupt on a single press"
   [ -z "$(fm_control_interrupt_clear_key agy)" ] || fail "agy must need no clear key"
@@ -852,10 +851,10 @@ test_agy_missing_binary_refuses_before_pane_creation() {
   pass "fm-spawn: a missing agy executable refuses before pane creation"
 }
 
-test_agy_secondmate_is_refused() {
+test_agy_secondmate_is_permitted() {
   local id rec out rc
   id="agy-secondmate-z6-$$"
-  rec=$(make_agy_spawn_case secondmate-refuse "$id")
+  rec=$(make_agy_spawn_case secondmate-allow "$id")
   read_agy_spawn_record "$rec"
   rc=0
   out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
@@ -863,10 +862,9 @@ test_agy_secondmate_is_refused() {
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
     "$SPAWN" "$id" --secondmate agy 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "an agy secondmate spawn should be refused"
-  assert_contains "$out" "agy is a verified crewmate/scout adapter only" \
-    "agy secondmate refusal lacked its concrete reason"
-  pass "fm-spawn: agy cannot be launched as a secondmate"
+  assert_not_contains "$out" "agy is a verified crewmate/scout adapter only" \
+    "agy secondmate should no longer be refused as crewmate/scout only"
+  pass "fm-spawn: agy is permitted as a secondmate"
 }
 
 test_agy_spawn_arms_no_busy_wiring() {
@@ -915,5 +913,5 @@ test_agy_unregistered_path_ignores_busy_until_the_dialog_is_answered
 test_agy_unregistered_path_without_a_dialog_fails_the_spawn
 test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
 test_agy_missing_binary_refuses_before_pane_creation
-test_agy_secondmate_is_refused
+test_agy_secondmate_is_permitted
 test_agy_spawn_arms_no_busy_wiring

@@ -1,0 +1,23 @@
+{
+  "firstmate": {
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -x ./bin/fm-turnend-guard-agy.sh ]; then ./bin/fm-turnend-guard-agy.sh --pretool; else ../bin/fm-turnend-guard-agy.sh --pretool; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "if [ -x ./bin/fm-turnend-guard-agy.sh ]; then ./bin/fm-turnend-guard-agy.sh; else ../bin/fm-turnend-guard-agy.sh; fi",
+        "timeout": 300
+      }
+    ]
+  }
+}

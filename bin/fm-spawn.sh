@@ -450,7 +450,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse, gemini, agy, and devin are crewmate/scout only and are refused for --secondmate.
+# log; muse, gemini, and devin are crewmate/scout only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -458,14 +458,13 @@
 # only after a TUI readiness gate, then a delivery-confirmation gate - the same
 # launch-then-send shape as kimi. Its busy state is a screen-scrape fallback like
 # grok. rovo is crewmate/scout only and is refused for --secondmate, like muse.
-# agy installs no hook either - it exposes no hook surface at all - so it
-# carries no busy-source wiring and no turn-end hook. Its brief rides the launch
-# command, but a fresh worktree would park it on a folder-trust dialog, so the
-# spawn pre-registers the worktree in agy's own trust store through
-# bin/fm-agy-trust.sh (the claude shape, but non-fatal) and then waits for a
-# busy turn - answering the dialog first if it renders anyway - before
+# agy installs a Stop hook in .agents/hooks.json for primary/secondmate supervision.
+# Its brief rides the launch command, but a fresh worktree would park it on a
+# folder-trust dialog, so the spawn pre-registers the worktree in agy's own trust
+# store through bin/fm-agy-trust.sh (the claude shape, but non-fatal) and then waits
+# for a busy turn - answering the dialog first if it renders anyway - before
 # reporting success (the rovo/kimi launch-then-confirm shape). Its busy state
-# is a screen-scrape fallback like grok and rovo, and it is crewmate/scout only.
+# is a screen-scrape fallback like grok and rovo.
 # cursor installs no per-task hook either: it writes state/<id>.cursor-session to
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
@@ -2381,7 +2380,7 @@ case "$ARG3" in
   ;;
 esac
 
-# muse, gemini, agy, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -2391,11 +2390,9 @@ esac
 # asyncRewake handlers that firstmate's primary turn-end supervision is built on
 # (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
 # secondmate whose supervision cycle could never be armed.
-# agy has none either: it exposes no hook surface for primary supervision and
-# docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
 # devin has none either: only its worker lifecycle hooks are verified, and
 # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = devin ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
