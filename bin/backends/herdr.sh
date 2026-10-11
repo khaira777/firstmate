@@ -3506,10 +3506,6 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         busy) printf 'empty'; return 0 ;;
         unknown) printf 'unknown'; return 0 ;;
       esac
-      if [ "$allow_rendered" = 1 ] && [ "$(fm_backend_herdr_rendered_busy_state "$target")" = busy ]; then
-        printf 'empty'
-        return 0
-      fi
       # Native stayed idle. Composer empty is positive delivery (a landed
       # Claude turn that never flipped agent_status). Proven pending retries.
       # A picker that classifies pending must not receive that retry.

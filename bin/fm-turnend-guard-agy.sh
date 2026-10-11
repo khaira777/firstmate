@@ -334,15 +334,24 @@ CURSOR_FILE="$STATE/.agy-history-line"
 LAST_PROCESSED_LINE=$(cat "$CURSOR_FILE" 2>/dev/null || echo 0)
 case "$LAST_PROCESSED_LINE" in ''|*[!0-9]*) LAST_PROCESSED_LINE=0 ;; esac
 
-INITIAL_HISTORY_LINES=0
-if [ -f "$AGY_HISTORY_FILE" ]; then
-  INITIAL_HISTORY_LINES=$(wc -l < "$AGY_HISTORY_FILE" 2>/dev/null || echo 0)
-  INITIAL_HISTORY_LINES=$((INITIAL_HISTORY_LINES + 0))
-fi
+agy_history_count() {
+  local file=$1 sid=$2 count=0
+  [ -f "$file" ] || { echo 0; return 0; }
+  if [ -n "$sid" ] && [ "$sid" != unknown ]; then
+    count=$(grep -c "\"conversationId\":\"$sid\"" "$file" 2>/dev/null || true)
+  else
+    count=$(wc -l < "$file" 2>/dev/null || true)
+  fi
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  echo "$count"
+}
+
+INITIAL_HISTORY_LINES=$(agy_history_count "$AGY_HISTORY_FILE" "$SESSION_ID")
+INITIAL_HISTORY_LINES=$((INITIAL_HISTORY_LINES + 0))
 
 # Detect messages queued during this turn
-if [ "$LAST_PROCESSED_LINE" -gt 0 ] && [ "$INITIAL_HISTORY_LINES" -gt "$((LAST_PROCESSED_LINE + 1))" ]; then
-  printf '%s\n' "$((LAST_PROCESSED_LINE + 1))" > "$CURSOR_FILE" 2>/dev/null || true
+if [ "$LAST_PROCESSED_LINE" -gt 0 ] && [ "$INITIAL_HISTORY_LINES" -gt "$LAST_PROCESSED_LINE" ]; then
+  printf '%s\n' "$INITIAL_HISTORY_LINES" > "$CURSOR_FILE" 2>/dev/null || true
   echo "{}"
   exit 0
 fi
@@ -375,7 +384,7 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
       break
     fi
     if [ -f "$AGY_HISTORY_FILE" ]; then
-      current_history_lines=$(wc -l < "$AGY_HISTORY_FILE" 2>/dev/null || echo 0)
+      current_history_lines=$(agy_history_count "$AGY_HISTORY_FILE" "$SESSION_ID")
       if [ "$((current_history_lines + 0))" -gt "$INITIAL_HISTORY_LINES" ]; then
         STAND_DOWN=1
         break
