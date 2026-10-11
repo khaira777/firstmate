@@ -3521,7 +3521,13 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       case "$verdict" in
         empty) printf 'empty'; return 0 ;;
         pending|pending-unproven) ;;
-        *) printf '%s' "$verdict"; return 0 ;;
+        *)
+          if [ "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = working ] \
+            || [ "$(fm_backend_herdr_rendered_busy_state "$target")" = busy ]; then
+            printf 'empty'
+            return 0
+          fi
+          printf '%s' "$verdict"; return 0 ;;
       esac
     else
       sleep "$sleep_s"
