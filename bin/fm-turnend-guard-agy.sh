@@ -329,11 +329,10 @@ fi
 
 trap '[ -n "$ARM_PID" ] && kill "$ARM_PID" 2>/dev/null; [ -n "$ARM_OUT" ] && rm -f "$ARM_OUT" 2>/dev/null; :' EXIT
 
-# If a watcher is already healthy right now, no need to wait or arm.
-if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-  budget_reset_if_ours
-  echo "{}"
-  exit 0
+AGY_HISTORY_FILE="${FM_AGY_HISTORY_FILE:-${HOME:-}/.gemini/antigravity-cli/history.jsonl}"
+INITIAL_HISTORY_LINES=0
+if [ -f "$AGY_HISTORY_FILE" ]; then
+  INITIAL_HISTORY_LINES=$(wc -l < "$AGY_HISTORY_FILE" 2>/dev/null || echo 0)
 fi
 
 attempt=0
@@ -349,28 +348,19 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
     "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 &
   fi
   ARM_PID=$!
-  start_time=$(date +%s)
   while kill -0 "$ARM_PID" 2>/dev/null; do
     if ! park_still_ours || ! current_session_still_ours || [ -e "$STATE/.afk" ]; then
       STAND_DOWN=1
       break
     fi
-    # Check for actionable wake output
-    if [ -n "$ARM_OUT" ] && grep -Eq "$ACTIONABLE_RE" "$ARM_OUT" 2>/dev/null; then
-      ACTIONABLE=1
-      break
+    if [ -f "$AGY_HISTORY_FILE" ]; then
+      current_history_lines=$(wc -l < "$AGY_HISTORY_FILE" 2>/dev/null || echo 0)
+      if [ "$current_history_lines" -gt "$INITIAL_HISTORY_LINES" ]; then
+        STAND_DOWN=1
+        break
+      fi
     fi
-    # For a persistent background watcher: if it has established and confirmed healthy,
-    # we do NOT block the terminal TUI; exit cleanly and let the watcher run in the background.
-    if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-      HEALTHY=1
-      break
-    fi
-    now=$(date +%s)
-    if [ $((now - start_time)) -ge "$PARK_MAX_SECONDS" ]; then
-      break
-    fi
-    sleep 0.1
+    sleep 0.5
   done
   if [ "$STAND_DOWN" -eq 1 ]; then
     kill "$ARM_PID" 2>/dev/null
@@ -378,17 +368,38 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
     echo "{}"
     exit 0
   fi
+  HOST_RC=0
+  wait "$ARM_PID" 2>/dev/null || HOST_RC=$?
+  ARM_PID=
 
-  # Check again if process exited with actionable wake
-  if [ -n "$ARM_OUT" ] && grep -Eq "$ACTIONABLE_RE" "$ARM_OUT" 2>/dev/null; then
-    ACTIONABLE=1
-    break
+  # Away mode may have been entered while parked: the daemon owns triage now.
+  [ -e "$STATE/.afk" ] && { echo "{}"; exit 0; }
+
+  ACTIONABLE=0
+  if [ -n "$ARM_OUT" ]; then
+    grep -Eq "$ACTIONABLE_RE" "$ARM_OUT" 2>/dev/null && ACTIONABLE=1
   fi
+  [ "$ACTIONABLE" -eq 1 ] && break
+
+  if [ "$HOST_MODE" -eq 1 ]; then
+    if [ -n "$ARM_OUT" ] && grep -q '^supervision-host stood down:' "$ARM_OUT" 2>/dev/null; then
+      echo "{}"
+      exit 0
+    fi
+    if [ "$HOST_RC" -gt 128 ] || [ -z "$ARM_OUT" ] || [ ! -s "$ARM_OUT" ]; then
+      [ "$attempt" -lt "$ARM_ATTEMPTS" ] || break
+      [ -z "$ARM_OUT" ] || rm -f "$ARM_OUT" 2>/dev/null
+      ARM_OUT=
+      continue
+    fi
+  fi
+
+  # A non-actionable close is benign when another verified watcher already owns
+  # this home and is still beating inside the shared grace window.
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
     HEALTHY=1
     break
   fi
-
   [ "$attempt" -lt "$ARM_ATTEMPTS" ] || break
   [ -n "$ARM_OUT" ] && rm -f "$ARM_OUT" 2>/dev/null
   ARM_OUT=

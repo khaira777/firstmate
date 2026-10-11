@@ -16,7 +16,7 @@
       {
         "type": "command",
         "command": "if [ -x ./bin/fm-turnend-guard-agy.sh ]; then ./bin/fm-turnend-guard-agy.sh; else ../bin/fm-turnend-guard-agy.sh; fi",
-        "timeout": 300
+        "timeout": 28800
       }
     ]
   }
