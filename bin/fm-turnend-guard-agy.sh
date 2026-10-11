@@ -350,8 +350,8 @@ INITIAL_HISTORY_LINES=$(agy_history_count "$AGY_HISTORY_FILE" "$SESSION_ID")
 INITIAL_HISTORY_LINES=$((INITIAL_HISTORY_LINES + 0))
 
 # Detect messages queued during this turn
-if [ "$LAST_PROCESSED_LINE" -gt 0 ] && [ "$INITIAL_HISTORY_LINES" -gt "$LAST_PROCESSED_LINE" ]; then
-  printf '%s\n' "$INITIAL_HISTORY_LINES" > "$CURSOR_FILE" 2>/dev/null || true
+if [ "$LAST_PROCESSED_LINE" -gt 0 ] && [ "$INITIAL_HISTORY_LINES" -gt "$((LAST_PROCESSED_LINE + 1))" ]; then
+  printf '%s\n' "$((LAST_PROCESSED_LINE + 1))" > "$CURSOR_FILE" 2>/dev/null || true
   echo "{}"
   exit 0
 fi

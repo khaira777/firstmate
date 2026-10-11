@@ -364,6 +364,49 @@ SH
   pass "bin/fm-turnend-guard-agy.sh: repair continuations are bounded and allow {} when exhausted"
 }
 
+test_stop_hook_history_scoping_ignores_sibling_agents() {
+  local dir primary hist out dec out2
+  dir="$TMP_ROOT/stop-history-scoping"
+  primary=$(make_primary_dir "$dir")
+  hist="$dir/history.jsonl"
+
+  printf 'task-789\n' > "$primary/state/in-flight"
+  printf 'id=task-789\nkind=ship\n' > "$primary/state/task-789.meta"
+
+  cat > "$primary/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 0.1
+printf 'signal: task task-789 wake\n'
+SH
+  chmod +x "$primary/bin/fm-watch-arm.sh"
+
+  printf '{"conversationId":"conv-sibling","display":"cmd 1"}\n' > "$hist"
+  printf '{"conversationId":"conv-sibling","display":"cmd 2"}\n' >> "$hist"
+  printf '{"conversationId":"conv-ours","display":"prompt 1"}\n' >> "$hist"
+  printf '0\n' > "$primary/state/.agy-history-line"
+
+  out=$(FM_HOME="$primary" FM_AGY_HISTORY_FILE="$hist" "$FAKE_AGY" -c '
+    cd "$FM_HOME"
+    "$FM_HOME/bin/fm-lock.sh" >/dev/null
+    printf "{\"executionNum\":1,\"conversationId\":\"conv-ours\",\"terminationReason\":\"model_stop\"}" | \
+      "$FM_HOME/bin/fm-turnend-guard-agy.sh"
+  ')
+  dec=$(printf '%s' "$out" | jq -r '.decision // empty')
+  [ "$dec" = "continue" ] || fail "expected continue on wake despite sibling history lines, got: '$out'"
+
+  printf '{"conversationId":"conv-ours","display":"prompt 2"}\n' >> "$hist"
+  printf '{"conversationId":"conv-ours","display":"queued prompt 3"}\n' >> "$hist"
+  out2=$(FM_HOME="$primary" FM_AGY_HISTORY_FILE="$hist" "$FAKE_AGY" -c '
+    cd "$FM_HOME"
+    "$FM_HOME/bin/fm-lock.sh" >/dev/null
+    printf "{\"executionNum\":2,\"conversationId\":\"conv-ours\",\"terminationReason\":\"model_stop\"}" | \
+      "$FM_HOME/bin/fm-turnend-guard-agy.sh"
+  ')
+  [ "$out2" = "{}" ] || fail "expected {} on genuinely queued user message, got: '$out2'"
+
+  pass "bin/fm-turnend-guard-agy.sh: scopes history to conversationId and releases on queued messages"
+}
+
 # --- Execution ---
 test_agy_session_lock_ancestry_identification
 test_agy_acquires_and_owns_session_lock
@@ -375,3 +418,4 @@ test_hooks_are_no_op_in_child_worktree
 test_stop_hook_fast_path_when_idle
 test_stop_hook_parks_and_wakes_on_actionable_close
 test_stop_hook_bounded_repair_continuations
+test_stop_hook_history_scoping_ignores_sibling_agents
