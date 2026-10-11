@@ -330,10 +330,31 @@ fi
 trap '[ -n "$ARM_PID" ] && kill "$ARM_PID" 2>/dev/null; [ -n "$ARM_OUT" ] && rm -f "$ARM_OUT" 2>/dev/null; :' EXIT
 
 AGY_HISTORY_FILE="${FM_AGY_HISTORY_FILE:-${HOME:-}/.gemini/antigravity-cli/history.jsonl}"
+CURSOR_FILE="$STATE/.agy-history-line"
+LAST_PROCESSED_LINE=$(cat "$CURSOR_FILE" 2>/dev/null || echo 0)
+case "$LAST_PROCESSED_LINE" in ''|*[!0-9]*) LAST_PROCESSED_LINE=0 ;; esac
+
 INITIAL_HISTORY_LINES=0
 if [ -f "$AGY_HISTORY_FILE" ]; then
   INITIAL_HISTORY_LINES=$(wc -l < "$AGY_HISTORY_FILE" 2>/dev/null || echo 0)
+  INITIAL_HISTORY_LINES=$((INITIAL_HISTORY_LINES + 0))
 fi
+
+# Detect messages queued during this turn
+if [ "$LAST_PROCESSED_LINE" -gt 0 ] && [ "$INITIAL_HISTORY_LINES" -gt "$((LAST_PROCESSED_LINE + 1))" ]; then
+  printf '%s\n' "$((LAST_PROCESSED_LINE + 1))" > "$CURSOR_FILE" 2>/dev/null || true
+  echo "{}"
+  exit 0
+fi
+
+if [ -n "${HERDR_PANE_ID:-}" ] && command -v herdr >/dev/null 2>&1; then
+  if herdr --session "${HERDR_SESSION:-main}" pane read "$HERDR_PANE_ID" --lines 10 2>/dev/null | grep -q "queued messages"; then
+    echo "{}"
+    exit 0
+  fi
+fi
+
+printf '%s\n' "$INITIAL_HISTORY_LINES" > "$CURSOR_FILE" 2>/dev/null || true
 
 attempt=0
 while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
@@ -355,7 +376,13 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
     fi
     if [ -f "$AGY_HISTORY_FILE" ]; then
       current_history_lines=$(wc -l < "$AGY_HISTORY_FILE" 2>/dev/null || echo 0)
-      if [ "$current_history_lines" -gt "$INITIAL_HISTORY_LINES" ]; then
+      if [ "$((current_history_lines + 0))" -gt "$INITIAL_HISTORY_LINES" ]; then
+        STAND_DOWN=1
+        break
+      fi
+    fi
+    if [ -n "${HERDR_PANE_ID:-}" ] && command -v herdr >/dev/null 2>&1; then
+      if herdr --session "${HERDR_SESSION:-main}" pane read "$HERDR_PANE_ID" --lines 10 2>/dev/null | grep -q "queued messages"; then
         STAND_DOWN=1
         break
       fi
