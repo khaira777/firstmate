@@ -788,6 +788,55 @@ SH
   pass "teardown closes a landed Gerrit task with its change URL as a note and a GitHub task with --pr"
 }
 
+test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note() {
+  local case_dir out real_tasks_axi url forge
+  local gitlab_url=https://gitlab.example.com/group/sub/repo/-/merge_requests/12
+  case_dir=$(make_case tasks-axi-close-gitlab)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=%s\n' "$gitlab_url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  # Pin the refusal tasks-axi applies to a --pr link that is neither a GitHub
+  # nor a Forgejo pull request, so this case keeps reproducing whatever the
+  # installed release accepts.
+  real_tasks_axi=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+previous=
+for arg in "\$@"; do
+  if [ "\$previous" = --pr ] && ! [[ "\$arg" =~ ^https://[^/]+/[^/]+/[^/]+/pulls?/[0-9]+\$ ]]; then
+    echo "error: \"Task pr link must be a canonical pull request URL\""
+    exit 1
+  fi
+  previous=\$arg
+done
+exec "$real_tasks_axi" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed GitLab task failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "teardown left a landed GitLab task's backlog item at $(backlog_row_state "$case_dir"): $out"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -F "body: \"GitLab merge request $gitlab_url\"" >/dev/null \
+    || fail "closed GitLab backlog item did not record its merge request URL as a note"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "a landed GitLab close left its pending-close record behind"
+
+  for url in https://github.com/example/repo/pull/7 https://forgejo.example.com/example/repo/pulls/7; do
+    forge=${url#https://}
+    case_dir=$(make_case "tasks-axi-close-pr-under-gitlab-refusal-${forge%%.*}")
+    write_meta "$case_dir" no-mistakes ship
+    printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+    seed_backlog_in_flight "$case_dir"
+    cp "$TMP_ROOT/tasks-axi-close-gitlab/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
+    out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed task with $url failed: $out"
+    tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
+      | grep -F "links: \"pr:$url\"" >/dev/null \
+      || fail "$url no longer closed as the item's pr link"
+  done
+  pass "teardown closes a landed GitLab task with its merge request URL as a note and GitHub and Forgejo tasks with --pr"
+}
+
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -1022,6 +1071,60 @@ test_squash_merged_rebased_branch_allows() {
   expect_code 0 "$rc" "squash-rebased: teardown should succeed when the worktree followed the pipeline rebase"$'\n'"$(cat "$case_dir/stderr")"
   ! grep -q REFUSED "$case_dir/stderr" || fail "squash-rebased: teardown printed a REFUSED line"
   pass "squash-merged task whose local branch followed the pipeline rebase is torn down"
+}
+
+# Override tea to answer one login for git.example.org and a pull request
+# read through "tea api" with the supplied merged flag and head.
+add_tea_pull_for_head() {
+  local case_dir=$1 merged=$2 head=$3
+  cat > "$case_dir/fakebin/tea" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/tea.log"
+if [ "\${1:-} \${2:-}" = "login list" ]; then
+  printf '[\n  {\n    "name": "fj",\n    "url": "https://git.example.org"\n  }\n]\n'
+  exit 0
+fi
+[ "\${1:-}" = api ] || exit 1
+printf '{"state":"closed","merged":%s,"head":{"sha":"%s"}}\n' '$merged' '$head'
+SH
+  chmod +x "$case_dir/fakebin/tea"
+}
+
+# A Forgejo task whose default branch moved on after the squash merge, editing
+# the same lines, leaves the content check inconclusive, so only the forge's
+# merged record can prove the work landed. With the record merged teardown
+# proceeds; with it unmerged the same history refuses.
+test_squash_merged_forgejo_pr_allows_when_main_moved_on() {
+  local case_dir rc pr_head tmp merged expected
+  for merged in true false; do
+    case_dir=$(make_case "forgejo-merged-$merged")
+    write_meta "$case_dir" no-mistakes ship
+    pr_head=$(setup_squash_rebased_history "$case_dir" rebased)
+    tmp="$case_dir/_main_later"
+    git clone -q "$case_dir/origin.git" "$tmp"
+    printf '%s\n' base main-edit feature-edit-reworded > "$tmp/shared.txt"
+    git -C "$tmp" add -- shared.txt
+    git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "main rewords shared"
+    git -C "$tmp" push -q origin main
+    rm -rf "$tmp"
+    printf '%s\n' \
+      'pr=https://git.example.org/team/repo/pulls/7' \
+      "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
+    add_gh_axi_error "$case_dir"
+    add_tea_pull_for_head "$case_dir" "$merged" "$pr_head"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expected=1
+    [ "$merged" = false ] || expected=0
+    expect_code "$expected" "$rc" "forgejo-merged-$merged: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
+    grep -qF -- 'api --login fj --repo team/repo /repos/{owner}/{repo}/pulls/7' "$case_dir/tea.log" \
+      || fail "forgejo-merged-$merged: teardown did not read the Forgejo pull request through tea"
+  done
+  pass "teardown proves a Forgejo task landed from the merged pull request when the content check is inconclusive"
 }
 
 test_squash_merged_same_file_different_content_refuses() {
@@ -2635,6 +2738,107 @@ test_teardown_missing_busy_sidecar_completes() {
   assert_absent "$case_dir/state/task-x1.meta" \
     "missing-busy-sidecar: teardown remained incomplete"
   pass "teardown completes when an exact busy-state sidecar is already absent"
+}
+
+test_teardown_preserves_opencode_busy_plugin_on_pool_return() {
+  local case_dir rc plugin
+  case_dir=$(make_case opencode-busy-wiring)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=opencode\n' >> "$case_dir/state/task-x1.meta"
+  # Keep scratch cleanup from removing the file independently of hook retirement.
+  printf '.opencode/\n' >> "$(git -C "$case_dir/wt" rev-parse --git-path info/exclude)"
+  plugin="$case_dir/wt/.opencode/plugins/fm-busy-state.js"
+  mkdir -p "$(dirname "$plugin")"
+  printf 'prior busy plugin\n' > "$plugin"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "opencode-busy-wiring: teardown should succeed ($(cat "$case_dir/stderr"))"
+  [ -f "$plugin" ] || fail "opencode-busy-wiring: pool return must retain the busy plugin as on main"
+  assert_contains "$(cat "$plugin")" "prior busy plugin" \
+    "opencode-busy-wiring: pool return must leave the plugin unchanged"
+  pass "teardown leaves opencode's busy plugin in the returned pool worktree as on main"
+}
+
+seed_polytoken_wiring() {
+  local case_dir=$1
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-polytoken-lib.sh"
+    fm_polytoken_write_facet "$case_dir/wt" "$case_dir/state/task-x1.inbox"
+    fm_polytoken_write_hooks "$case_dir/wt" "$(fm_polytoken_busy_script "$case_dir/state" task-x1)"
+  ) || fail "seeding the generated polytoken wiring failed"
+}
+
+test_teardown_retires_polytoken_wiring_on_pool_return() {
+  local case_dir rc
+  case_dir=$(make_case polytoken-wiring)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=polytoken\n' >> "$case_dir/state/task-x1.meta"
+  seed_polytoken_wiring "$case_dir"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "polytoken-wiring: teardown should succeed ($(cat "$case_dir/stderr"))"
+  assert_absent "$case_dir/wt/.polytoken/hooks.json" \
+    "polytoken-wiring: the generated hook layer survived pool return"
+  assert_absent "$case_dir/wt/.polytoken/facets/firstmate-worker.md" \
+    "polytoken-wiring: the generated worker facet survived pool return"
+  pass "teardown retires a polytoken task's generated worktree wiring on pool return"
+}
+
+test_teardown_preserves_tracked_polytoken_layer() {
+  local case_dir rc
+  case_dir=$(make_case polytoken-tracked)
+  write_meta "$case_dir" local-only ship
+  printf 'harness=polytoken\n' >> "$case_dir/state/task-x1.meta"
+  seed_polytoken_wiring "$case_dir"
+  git -C "$case_dir/wt" add -f .polytoken/hooks.json
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "project hook layer"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "polytoken-tracked: teardown should succeed ($(cat "$case_dir/stderr"))"
+  [ -f "$case_dir/wt/.polytoken/hooks.json" ] \
+    || fail "polytoken-tracked: teardown deleted the project's tracked hook layer"
+  assert_absent "$case_dir/wt/.polytoken/facets/firstmate-worker.md" \
+    "polytoken-tracked: the untracked generated facet survived pool return"
+  pass "teardown never deletes a tracked .polytoken hook layer"
+}
+
+test_teardown_preserves_ignored_project_polytoken_layer() {
+  local case_dir rc
+  case_dir=$(make_case polytoken-project-own)
+  # Scratch/--force cleanup deliberately discards non-ignored untracked
+  # files. An ignored project layer isolates the adapter ownership check.
+  printf '.polytoken/\n' >> "$(git -C "$case_dir/wt" rev-parse --git-path info/exclude)"
+  write_meta "$case_dir" local-only ship
+  printf 'harness=polytoken\n' >> "$case_dir/state/task-x1.meta"
+  mkdir -p "$case_dir/wt/.polytoken"
+  printf '[{"name":"project-own","event":"stop","handler":{"bash":"/bin/true"}}]\n' \
+    > "$case_dir/wt/.polytoken/hooks.json"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "polytoken-project-own: teardown should succeed ($(cat "$case_dir/stderr"))"
+  assert_contains "$(cat "$case_dir/wt/.polytoken/hooks.json" 2>/dev/null)" "project-own" \
+    "polytoken-project-own: teardown deleted a hook layer firstmate did not generate"
+  pass "teardown never deletes a .polytoken hook layer firstmate did not generate"
+}
+
+test_teardown_leaves_polytoken_layer_for_other_harnesses() {
+  local case_dir rc
+  case_dir=$(make_case polytoken-other-harness)
+  # Scratch/--force cleanup deliberately discards non-ignored untracked
+  # files. An ignored project layer isolates the adapter ownership check.
+  printf '.polytoken/\n' >> "$(git -C "$case_dir/wt" rev-parse --git-path info/exclude)"
+  write_meta "$case_dir" local-only ship
+  printf 'harness=claude\n' >> "$case_dir/state/task-x1.meta"
+  seed_polytoken_wiring "$case_dir"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "polytoken-other-harness: teardown should succeed ($(cat "$case_dir/stderr"))"
+  [ -f "$case_dir/wt/.polytoken/hooks.json" ] \
+    || fail "polytoken-other-harness: a non-polytoken teardown removed .polytoken/hooks.json"
+  [ -f "$case_dir/wt/.polytoken/facets/firstmate-worker.md" ] \
+    || fail "polytoken-other-harness: a non-polytoken teardown removed the facet file"
+  pass "teardown scopes .polytoken wiring removal to polytoken tasks"
 }
 
 test_herdr_teardown_clears_escalation_marker() {
@@ -4974,6 +5178,7 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
   pass "present required sources still reach the ordinary teardown refusal"
 }
 
+test_teardown_preserves_opencode_busy_plugin_on_pool_return
 test_missing_startup_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
 test_missing_adapter_sibling_refuses_before_cleanup
@@ -4983,6 +5188,7 @@ test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
+test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
@@ -4992,6 +5198,10 @@ test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes
+test_teardown_retires_polytoken_wiring_on_pool_return
+test_teardown_preserves_tracked_polytoken_layer
+test_teardown_preserves_ignored_project_polytoken_layer
+test_teardown_leaves_polytoken_layer_for_other_harnesses
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence
@@ -5015,6 +5225,7 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
 test_squash_merged_rebased_branch_allows
+test_squash_merged_forgejo_pr_allows_when_main_moved_on
 test_squash_merged_same_file_different_content_refuses
 test_squash_merged_rebased_local_with_unlanded_commit_refuses
 test_squash_merged_stale_local_refuses_when_forge_unreachable
