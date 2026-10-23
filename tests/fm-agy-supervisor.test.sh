@@ -62,6 +62,7 @@ install_scripts() {
            fm-supervision-lib.sh fm-wake-lib.sh fm-session-lock-lib.sh \
            fm-cursor-lib.sh fm-gemini-lib.sh fm-operational-input.sh \
            fm-supervision-instructions.sh fm-harness.sh fm-lock.sh \
+           fm-lease-lib.sh fm-guard.sh \
            fm-supervision-engine-lib.sh fm-control-lib.sh fm-path-lib.sh; do
     [ -f "$ROOT/bin/$f" ] && cp "$ROOT/bin/$f" "$dir/bin/$f"
   done
@@ -407,6 +408,189 @@ SH
   pass "bin/fm-turnend-guard-agy.sh: scopes history to conversationId and releases on queued messages"
 }
 
+test_stop_hook_cursor_recovery_slash_commands_and_nopark_log() {
+  local dir primary hist trans out1 out2 dec cur log_content
+  dir="$TMP_ROOT/stop-cursor-recovery"
+  primary=$(make_primary_dir "$dir")
+  hist="$dir/history.jsonl"
+  trans="$dir/transcript.jsonl"
+
+  cat > "$primary/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'signal: task task-cur finished\n'
+SH
+  chmod +x "$primary/bin/fm-watch-arm.sh"
+
+  # 1. Prompts sent while fleet is idle (! fm_supervision_needed) sync cursor and log no-park exit
+  printf '{"conversationId":"conv-cur","display":"idle prompt 1"}\n' > "$hist"
+  printf '{"conversationId":"conv-cur","display":"idle prompt 2"}\n' >> "$hist"
+  printf '{"conversationId":"conv-cur","display":"/model"}\n' >> "$hist"
+  out1=$(FM_HOME="$primary" FM_AGY_HISTORY_FILE="$hist" "$FAKE_AGY" -c '
+    cd "$FM_HOME"
+    "$FM_HOME/bin/fm-lock.sh" >/dev/null
+    printf "{\"executionNum\":1,\"conversationId\":\"conv-cur\",\"terminationReason\":\"model_stop\"}" | \
+      "$FM_HOME/bin/fm-turnend-guard-agy.sh"
+  ')
+  [ "$out1" = "{}" ] || fail "expected {} when idle, got: '$out1'"
+  cur=$(cat "$primary/state/.agy-history-line" 2>/dev/null || true)
+  [ "$cur" = "2" ] || fail "expected idle exit to sync cursor to 2 (ignoring /model), got: '$cur'"
+  log_content=$(cat "$primary/state/.agy-park-exits.log" 2>/dev/null || true)
+  assert_contains "$log_content" "reason=supervision-not-needed" "no-park log missing supervision-not-needed"
+
+  # 2. Multi-line cursor gap (e.g. cursor=2, history=7 non-slash lines) releases at most once and parks on next turn
+  printf 'task-cur\n' > "$primary/state/in-flight"
+  printf 'id=task-cur\nkind=ship\n' > "$primary/state/task-cur.meta"
+  for i in 3 4 5 6 7; do
+    printf '{"conversationId":"conv-cur","display":"prompt %d"}\n' "$i" >> "$hist"
+  done
+  printf '{"conversationId":"conv-cur","display":"/status"}\n' >> "$hist"
+
+  out1=$(FM_HOME="$primary" FM_AGY_HISTORY_FILE="$hist" "$FAKE_AGY" -c '
+    cd "$FM_HOME"
+    "$FM_HOME/bin/fm-lock.sh" >/dev/null
+    printf "{\"executionNum\":1,\"conversationId\":\"conv-cur\",\"terminationReason\":\"model_stop\"}" | \
+      "$FM_HOME/bin/fm-turnend-guard-agy.sh"
+  ')
+  [ "$out1" = "{}" ] || fail "expected single {} release on multi-line gap without transcript, got: '$out1'"
+  cur=$(cat "$primary/state/.agy-history-line" 2>/dev/null || true)
+  [ "$cur" = "6" ] || fail "expected multi-line release to advance cursor to INITIAL-1 (6), got: '$cur'"
+
+  out2=$(FM_HOME="$primary" FM_AGY_HISTORY_FILE="$hist" "$FAKE_AGY" -c '
+    cd "$FM_HOME"
+    "$FM_HOME/bin/fm-lock.sh" >/dev/null
+    printf "{\"executionNum\":2,\"conversationId\":\"conv-cur\",\"terminationReason\":\"model_stop\"}" | \
+      "$FM_HOME/bin/fm-turnend-guard-agy.sh"
+  ')
+  dec=$(printf '%s' "$out2" | jq -r '.decision // empty')
+  [ "$dec" = "continue" ] || fail "expected immediate park on turn after multi-line gap absorption, got: '$out2'"
+
+  # 3. With transcriptPath present, already-consumed prompts park immediately even if cursor lagged
+  printf '1\n' > "$primary/state/.agy-history-line"
+  printf '{"conversationId":"conv-cur","display":"consumed prompt","timestamp":1792763339270}\n' >> "$hist"
+  printf '{"step_index":1,"type":"USER_INPUT","created_at":"2026-10-23T13:48:59Z","content":"consumed prompt"}\n' > "$trans"
+  out2=$(FM_HOME="$primary" FM_AGY_HISTORY_FILE="$hist" "$FAKE_AGY" -c '
+    cd "$FM_HOME"
+    "$FM_HOME/bin/fm-lock.sh" >/dev/null
+    printf "{\"executionNum\":1,\"conversationId\":\"conv-cur\",\"terminationReason\":\"NO_TOOL_CALL\",\"fullyIdle\":true,\"transcriptPath\":\"'"$trans"'\"}" | \
+      "$FM_HOME/bin/fm-turnend-guard-agy.sh"
+  ')
+  dec=$(printf '%s' "$out2" | jq -r '.decision // empty')
+  [ "$dec" = "continue" ] || fail "expected park when transcript proves latest history entry was already consumed, got: '$out2'"
+
+  pass "bin/fm-turnend-guard-agy.sh: absorbs multi-line cursor gaps, ignores slash commands, checks transcript, and logs no-park exits"
+}
+
+test_stop_hook_yields_when_not_fully_idle() {
+  local dir primary trans out1 out2 out3 out4 dec log_content
+  dir="$TMP_ROOT/stop-fully-idle"
+  primary=$(make_primary_dir "$dir")
+  trans="$dir/transcript.jsonl"
+
+  printf 'task-bg\n' > "$primary/state/in-flight"
+  printf 'id=task-bg\nkind=ship\n' > "$primary/state/task-bg.meta"
+  cat > "$primary/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'signal: task task-bg finished\n'
+SH
+  chmod +x "$primary/bin/fm-watch-arm.sh"
+
+  # 1. Explicit fullyIdle: false returns {} without parking
+  out1=$(FM_HOME="$primary" "$FAKE_AGY" -c '
+    cd "$FM_HOME"
+    "$FM_HOME/bin/fm-lock.sh" >/dev/null
+    printf "{\"executionNumber\":1,\"conversationId\":\"conv-bg\",\"terminationReason\":\"NO_TOOL_CALL\",\"fullyIdle\":false}" | \
+      "$FM_HOME/bin/fm-turnend-guard-agy.sh"
+  ')
+  [ "$out1" = "{}" ] || fail "expected {} when fullyIdle is false, got: '$out1'"
+
+  # 2. Omitted fullyIdle (proto3 omitempty for false) with real agy terminationReason NO_TOOL_CALL returns {}
+  out2=$(FM_HOME="$primary" "$FAKE_AGY" -c '
+    cd "$FM_HOME"
+    "$FM_HOME/bin/fm-lock.sh" >/dev/null
+    printf "{\"executionNumber\":1,\"conversationId\":\"conv-bg\",\"terminationReason\":\"NO_TOOL_CALL\"}" | \
+      "$FM_HOME/bin/fm-turnend-guard-agy.sh"
+  ')
+  [ "$out2" = "{}" ] || fail "expected {} when fullyIdle is omitted on NO_TOOL_CALL, got: '$out2'"
+
+  # 3. Open background task in transcriptPath returns {} even if fullyIdle is true
+  printf '{"step_index":10,"type":"GENERIC","status":"RUNNING","content":"Tool is running as a background task with task id: conv-bg/task-10\\n"}\n' > "$trans"
+  out3=$(FM_HOME="$primary" "$FAKE_AGY" -c '
+    cd "$FM_HOME"
+    "$FM_HOME/bin/fm-lock.sh" >/dev/null
+    printf "{\"executionNumber\":1,\"conversationId\":\"conv-bg\",\"terminationReason\":\"NO_TOOL_CALL\",\"fullyIdle\":true,\"transcriptPath\":\"'"$trans"'\"}" | \
+      "$FM_HOME/bin/fm-turnend-guard-agy.sh"
+  ')
+  [ "$out3" = "{}" ] || fail "expected {} when transcript has open background task, got: '$out3'"
+
+  log_content=$(cat "$primary/state/.agy-park-exits.log" 2>/dev/null || true)
+  assert_contains "$log_content" "reason=not-fully-idle" "expected not-fully-idle in .agy-park-exits.log"
+
+  # 4. Once background task SYSTEM_MESSAGE arrives and fullyIdle is true, Stop hook parks and wakes
+  printf '{"step_index":11,"type":"SYSTEM_MESSAGE","status":"DONE","content":"[Message] timestamp=2026-10-23T14:00:00Z sender=conv-bg/task-10 priority=MESSAGE_PRIORITY_HIGH content=Task finished"}\n' >> "$trans"
+  out4=$(FM_HOME="$primary" "$FAKE_AGY" -c '
+    cd "$FM_HOME"
+    "$FM_HOME/bin/fm-lock.sh" >/dev/null
+    printf "{\"executionNumber\":1,\"conversationId\":\"conv-bg\",\"terminationReason\":\"NO_TOOL_CALL\",\"fullyIdle\":true,\"transcriptPath\":\"'"$trans"'\"}" | \
+      "$FM_HOME/bin/fm-turnend-guard-agy.sh"
+  ')
+  dec=$(printf '%s' "$out4" | jq -r '.decision // empty')
+  [ "$dec" = "continue" ] || fail "expected continue once fullyIdle is true and bg task completed, got: '$out4'"
+
+  pass "bin/fm-turnend-guard-agy.sh: yields park when not fullyIdle and parks once background tasks complete"
+}
+
+test_stop_hook_releases_when_supervision_ends_mid_park() {
+  local dir primary out log_content
+  dir="$TMP_ROOT/stop-mid-park-release"
+  primary=$(make_primary_dir "$dir")
+
+  printf 'task-mid\n' > "$primary/state/in-flight"
+  printf 'id=task-mid\nkind=ship\n' > "$primary/state/task-mid.meta"
+
+  cat > "$primary/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 0.2
+rm -f "$FM_HOME/state/in-flight" "$FM_HOME/state/task-mid.meta"
+exec sleep 5
+SH
+  chmod +x "$primary/bin/fm-watch-arm.sh"
+
+  out=$(FM_HOME="$primary" "$FAKE_AGY" -c '
+    cd "$FM_HOME"
+    "$FM_HOME/bin/fm-lock.sh" >/dev/null
+    printf "{\"executionNum\":1,\"conversationId\":\"conv-mid\",\"terminationReason\":\"model_stop\"}" | \
+      "$FM_HOME/bin/fm-turnend-guard-agy.sh"
+  ')
+  [ "$out" = "{}" ] || fail "expected {} when supervision ends mid-park, got: '$out'"
+  log_content=$(cat "$primary/state/.agy-park-exits.log" 2>/dev/null || true)
+  assert_contains "$log_content" "reason=supervision-ended" "expected supervision-ended stand-down reason in log"
+
+  pass "bin/fm-turnend-guard-agy.sh: stands down mid-park when supervision ceases to be needed"
+}
+
+test_agy_supervision_model_is_autoarm_midturn() {
+  local dir primary out
+  dir="$TMP_ROOT/agy-autoarm-model"
+  primary=$(make_primary_dir "$dir")
+
+  printf 'task-guard\n' > "$primary/state/in-flight"
+  printf 'id=task-guard\nkind=ship\n' > "$primary/state/task-guard.meta"
+  printf 'fresh\n' > "$primary/state/.last-watcher-beat"
+
+  out=$(FM_HOME="$primary" FM_ROOT="$primary" "$FAKE_AGY" -c '
+    unset CLAUDECODE CURSOR_AGENT OPENCODE PI_CODING_AGENT FM_SUPERVISION_MODEL
+    export ANTIGRAVITY_CLI_ALIAS=agy
+    . "$FM_HOME/bin/fm-wake-lib.sh"
+    model=$(fm_supervision_model)
+    fm_watcher_supervision_verdict "$FM_HOME/state" "$FM_HOME/bin/fm-watch.sh" 300 "$FM_HOME" "$FM_HOME"
+    printf "model=%s ok=%s reason=%s\n" "$model" "$FM_WATCHER_VERDICT_OK" "$FM_WATCHER_VERDICT_REASON"
+  ')
+  [ "$out" = "model=autoarm ok=true reason=stale-beacon" ] \
+    || fail "expected agy supervision model autoarm with ok=true on fresh beacon, got: '$out'"
+
+  pass "bin/fm-wake-lib.sh: classifies agy as autoarm and suppresses mid-turn WATCHER DOWN false alarms"
+}
+
 # --- Execution ---
 test_agy_session_lock_ancestry_identification
 test_agy_acquires_and_owns_session_lock
@@ -419,3 +603,7 @@ test_stop_hook_fast_path_when_idle
 test_stop_hook_parks_and_wakes_on_actionable_close
 test_stop_hook_bounded_repair_continuations
 test_stop_hook_history_scoping_ignores_sibling_agents
+test_stop_hook_cursor_recovery_slash_commands_and_nopark_log
+test_stop_hook_yields_when_not_fully_idle
+test_stop_hook_releases_when_supervision_ends_mid_park
+test_agy_supervision_model_is_autoarm_midturn

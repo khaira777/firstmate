@@ -29,6 +29,10 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 OWNER="$STATE/.agy-park-owner"
 OWNER_LOCK="$STATE/.agy-park-owner.lock"
 BUDGET_FILE="$STATE/.turnend-agy-blocks"
+PARK_LOG="$STATE/.agy-park-exits.log"
+PARK_LOG_LOCK="$STATE/.agy-park-exits.lock"
+PARK_LOG_MAX_BYTES=${FM_AGY_PARK_LOG_MAX_BYTES:-262144}
+PARK_LOG_KEEP_LINES=${FM_AGY_PARK_LOG_KEEP_LINES:-1000}
 
 LOOP_CEILING=${FM_AGY_TURNEND_LOOP_CEILING:-180}
 BLOCK_BUDGET=${FM_AGY_TURNEND_BLOCK_BUDGET:-3}
@@ -43,6 +47,8 @@ case "$ARM_ATTEMPTS" in 1|2|3) : ;; *) ARM_ATTEMPTS=2 ;; esac
 case "$POLL" in ''|*[!0-9]*|0) POLL=2 ;; esac
 case "$LOCK_ATTEMPTS" in ''|*[!0-9]*|0) LOCK_ATTEMPTS=50 ;; esac
 case "$PARK_MAX_SECONDS" in ''|*[!0-9]*|0) PARK_MAX_SECONDS=180 ;; esac
+case "$PARK_LOG_MAX_BYTES" in ''|*[!0-9]*|0) PARK_LOG_MAX_BYTES=262144 ;; esac
+case "$PARK_LOG_KEEP_LINES" in ''|*[!0-9]*|0) PARK_LOG_KEEP_LINES=1000 ;; esac
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -132,29 +138,158 @@ fi
 # Stop Hook Handler (Park Model)
 # ==============================================================================
 
+PARK_SEQ=
+SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.conversationId // .sessionId // "unknown"' 2>/dev/null || printf 'unknown')
+case "$SESSION_ID" in ''|*[!A-Za-z0-9._-]*) SESSION_ID=unknown ;; esac
+
+TERMINATION_REASON=$(printf '%s' "$PAYLOAD" | jq -r '.terminationReason // .termination_reason // "unknown"' 2>/dev/null || printf 'unknown')
+FULLY_IDLE=$(printf '%s' "$PAYLOAD" | jq -r '
+  if has("fullyIdle") then (.fullyIdle | tostring)
+  elif has("fully_idle") then (.fully_idle | tostring)
+  else "absent" end
+' 2>/dev/null || printf 'absent')
+TRANSCRIPT_PATH=$(printf '%s' "$PAYLOAD" | jq -r '.transcriptPath // .transcript_path // empty' 2>/dev/null || true)
+
+park_clean_field() {
+  printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-256
+}
+
+park_log_append() {  # <reason> [detail]
+  local reason=$1 detail=${2:-none} now pid seq size tmp raw i=0
+  [ -d "$STATE" ] || return 0
+  now=$(date +%s)
+  pid=${BASHPID:-$$}
+  seq=${PARK_SEQ:-none}
+  while ! fm_lock_try_acquire "$PARK_LOG_LOCK"; do
+    [ "$i" -lt 20 ] || return 0
+    sleep 0.02
+    i=$((i + 1))
+  done
+  printf 'at=%s\tpid=%s\tseq=%s\tsession=%s\treason=%s\tdetail=%s\n' \
+    "$now" \
+    "$pid" \
+    "$(park_clean_field "$seq")" \
+    "$(park_clean_field "${SESSION_ID:-unknown}")" \
+    "$(park_clean_field "$reason")" \
+    "$(park_clean_field "$detail")" >> "$PARK_LOG" 2>/dev/null || true
+  size=$(wc -c < "$PARK_LOG" 2>/dev/null | tr -d '[:space:]')
+  case "$size" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ "$size" -ge "$PARK_LOG_MAX_BYTES" ]; then
+        tmp="$PARK_LOG.tmp.$pid"
+        raw="$tmp.raw"
+        tail -n "$PARK_LOG_KEEP_LINES" "$PARK_LOG" 2>/dev/null \
+          | tail -c "$PARK_LOG_MAX_BYTES" > "$raw" 2>/dev/null \
+          && awk 'NR > 1 || /^at=/' "$raw" > "$tmp" 2>/dev/null \
+          && mv -f "$tmp" "$PARK_LOG" 2>/dev/null
+        rm -f "$tmp" "$raw" 2>/dev/null || true
+      fi
+      ;;
+  esac
+  fm_lock_release "$PARK_LOG_LOCK"
+}
+
+exit_nopark() {  # <reason> [detail]
+  park_log_append "$1" "${2:-none}"
+  echo "{}"
+  exit 0
+}
+
 # Session lock verification: only the lock-owning session may supervise.
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
-  case "$LOCK_PID" in ''|*[!0-9]*) echo "{}"; exit 0 ;; esac
-  fm_harness_pid_alive "$LOCK_PID" && { echo "{}"; exit 0; }
-  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || { echo "{}"; exit 0; }
-  fm_session_lock_owned_by_self "$STATE" || { echo "{}"; exit 0; }
+  case "$LOCK_PID" in ''|*[!0-9]*) exit_nopark "session-lock-invalid" "lock_pid=${LOCK_PID:-empty}" ;; esac
+  fm_harness_pid_alive "$LOCK_PID" && exit_nopark "session-lock-other-owner" "lock_pid=$LOCK_PID"
+  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit_nopark "session-lock-acquire-failed" "lock_pid=$LOCK_PID"
+  fm_session_lock_owned_by_self "$STATE" || exit_nopark "session-lock-not-owned" "lock_pid=$LOCK_PID"
 fi
 
 OWNER_ID=$(cat "$STATE/.lock" 2>/dev/null || true)
-case "$OWNER_ID" in ''|*[!0-9]*) echo "{}"; exit 0 ;; esac
+case "$OWNER_ID" in ''|*[!0-9]*) exit_nopark "owner-id-invalid" "owner_id=${OWNER_ID:-empty}" ;; esac
 
 EXECUTION_NUM=$(printf '%s' "$PAYLOAD" | jq -r '
   if type != "object" then error("payload")
   elif has("executionNum") then
     if ((.executionNum | type) == "number") then (.executionNum | floor) else 0 end
+  elif has("executionNumber") then
+    if ((.executionNumber | type) == "number") then (.executionNumber | floor) else 0 end
   else 0
   end
 ' 2>/dev/null || printf '0')
 case "$EXECUTION_NUM" in ''|*[!0-9]*) EXECUTION_NUM=0 ;; esac
 
-SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.conversationId // "unknown"' 2>/dev/null || printf 'unknown')
-case "$SESSION_ID" in ''|*[!A-Za-z0-9._-]*) SESSION_ID=unknown ;; esac
+AGY_HISTORY_FILE="${FM_AGY_HISTORY_FILE:-${HOME:-}/.gemini/antigravity-cli/history.jsonl}"
+CURSOR_FILE="$STATE/.agy-history-line"
+LAST_PROCESSED_LINE=$(cat "$CURSOR_FILE" 2>/dev/null || echo 0)
+case "$LAST_PROCESSED_LINE" in ''|*[!0-9]*) LAST_PROCESSED_LINE=0 ;; esac
+
+agy_history_count() {
+  local file=$1 sid=$2 count=0
+  [ -f "$file" ] || { echo 0; return 0; }
+  if [ -n "$sid" ] && [ "$sid" != unknown ]; then
+    count=$(grep "\"conversationId\":\"$sid\"" "$file" 2>/dev/null \
+      | grep -Evc '"display"[[:space:]]*:[[:space:]]*"/' || true)
+  else
+    count=$(grep -Evc '"display"[[:space:]]*:[[:space:]]*"/' "$file" 2>/dev/null || true)
+  fi
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  echo "$count"
+}
+
+INITIAL_HISTORY_LINES=$(agy_history_count "$AGY_HISTORY_FILE" "$SESSION_ID")
+INITIAL_HISTORY_LINES=$((INITIAL_HISTORY_LINES + 0))
+
+sync_history_cursor() {
+  printf '%s\n' "${1:-$INITIAL_HISTORY_LINES}" > "$CURSOR_FILE" 2>/dev/null || true
+}
+
+agy_not_fully_idle() {
+  case "$FULLY_IDLE" in
+    false) return 0 ;;
+    absent)
+      [ "$TERMINATION_REASON" = "NO_TOOL_CALL" ] && return 0
+      ;;
+  esac
+  if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
+    local open_tasks
+    open_tasks=$(tail -n 100 "$TRANSCRIPT_PATH" 2>/dev/null | jq -r '
+      if .type == "GENERIC" and (.content // "" | test("Tool is running as a background task with task id: ")) then
+        "OPEN:" + ((.content | capture("task id: (?<id>[^\\n\\r ]+)").id) // "")
+      elif .type == "SYSTEM_MESSAGE" and (.content // "" | test("sender=[^\\n\\r ]+")) then
+        "DONE:" + ((.content | capture("sender=(?<id>[^\\n\\r ]+)").id) // "")
+      else empty end
+    ' 2>/dev/null | awk -F: '
+      $1 == "OPEN" && $2 != "" { open[$2] = 1 }
+      $1 == "DONE" && $2 != "" { delete open[$2] }
+      END { for (k in open) { print k; exit 0 } }
+    ' 2>/dev/null || true)
+    [ -n "$open_tasks" ] && return 0
+  fi
+  return 1
+}
+
+agy_queued_message_confirmed() {
+  [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ] || return 0
+  [ -f "$AGY_HISTORY_FILE" ] || return 0
+  local hist_line hist_ts ui_ts
+  if [ -n "$SESSION_ID" ] && [ "$SESSION_ID" != unknown ]; then
+    hist_line=$(grep "\"conversationId\":\"$SESSION_ID\"" "$AGY_HISTORY_FILE" 2>/dev/null \
+      | grep -Ev '"display"[[:space:]]*:[[:space:]]*"/' | tail -n 1 || true)
+  else
+    hist_line=$(grep -Ev '"display"[[:space:]]*:[[:space:]]*"/' "$AGY_HISTORY_FILE" 2>/dev/null | tail -n 1 || true)
+  fi
+  [ -n "$hist_line" ] || return 0
+  hist_ts=$(printf '%s\n' "$hist_line" | jq -r '
+    if (.timestamp | type) == "number" then (.timestamp / 1000 | floor) else empty end
+  ' 2>/dev/null || true)
+  case "$hist_ts" in ''|*[!0-9]*) return 0 ;; esac
+  ui_ts=$(grep '"type":"USER_INPUT"' "$TRANSCRIPT_PATH" 2>/dev/null | tail -n 1 | jq -r '
+    .created_at | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601
+  ' 2>/dev/null || true)
+  case "$ui_ts" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$hist_ts" -gt "$((ui_ts + 2))" ]
+}
 
 lock_acquire_bounded() {  # <lock>
   local lock=$1 attempt=0
@@ -192,16 +327,14 @@ budget_reset() {
 }
 
 budget_reset_if_ours() {
-  lock_acquire_bounded "$OWNER_LOCK" || { echo "{}"; exit 0; }
+  lock_acquire_bounded "$OWNER_LOCK" || exit_nopark "budget-reset-lock-timeout"
   if ! park_still_ours || ! current_session_still_ours || [ -e "$STATE/.afk" ]; then
     fm_lock_release "$OWNER_LOCK"
-    echo "{}"
-    exit 0
+    exit_nopark "budget-reset-superseded"
   fi
   budget_reset || {
     fm_lock_release "$OWNER_LOCK"
-    echo "{}"
-    exit 0
+    exit_nopark "budget-reset-write-failed"
   }
   fm_lock_release "$OWNER_LOCK"
 }
@@ -239,18 +372,16 @@ current_session_still_ours() {
 
 emit_continue() {  # <kind> <body> [reset-budget]
   local kind=$1 body=$2 reset_budget=${3-} encoded response
-  fm_operational_input_encode "$kind" "$body" encoded || { echo "{}"; exit 0; }
-  response=$(jq -cn --arg m "$encoded" '{decision:"continue",reason:$m}' 2>/dev/null) || { echo "{}"; exit 0; }
-  lock_acquire_bounded "$OWNER_LOCK" || { echo "{}"; exit 0; }
+  fm_operational_input_encode "$kind" "$body" encoded || exit_nopark "encode-failed" "kind=$kind"
+  response=$(jq -cn --arg m "$encoded" '{decision:"continue",reason:$m}' 2>/dev/null) || exit_nopark "jq-encode-failed" "kind=$kind"
+  lock_acquire_bounded "$OWNER_LOCK" || exit_nopark "continue-lock-timeout" "kind=$kind"
   if ! park_still_ours || ! current_session_still_ours || [ -e "$STATE/.afk" ]; then
     fm_lock_release "$OWNER_LOCK"
-    echo "{}"
-    exit 0
+    exit_nopark "continue-superseded" "kind=$kind"
   fi
   if [ "$reset_budget" = reset-budget ] && ! budget_reset; then
     fm_lock_release "$OWNER_LOCK"
-    echo "{}"
-    exit 0
+    exit_nopark "continue-budget-reset-failed" "kind=$kind"
   fi
   printf '%s\n' "$response" || true
   fm_lock_release "$OWNER_LOCK"
@@ -259,9 +390,9 @@ emit_continue() {  # <kind> <body> [reset-budget]
 
 emit_repair_continue() {  # <reason> <arm-tail> <attempt>
   local reason=$1 arm_tail=$2 attempt_count=$3 prior count body encoded response
-  park_still_ours || { echo "{}"; exit 0; }
+  park_still_ours || exit_nopark "repair-superseded"
   budget_read
-  [ "$BUDGET_COUNT" -lt "$BLOCK_BUDGET" ] || { echo "{}"; exit 0; }
+  [ "$BUDGET_COUNT" -lt "$BLOCK_BUDGET" ] || exit_nopark "repair-budget-exhausted" "count=$BUDGET_COUNT budget=$BLOCK_BUDGET"
   prior=$BUDGET_COUNT
   count=$((prior + 1))
 
@@ -269,46 +400,56 @@ emit_repair_continue() {  # <reason> <arm-tail> <attempt>
 $arm_tail
 
 $reason"
-  fm_operational_input_encode turn-end-guard "$body" encoded || { echo "{}"; exit 0; }
-  response=$(jq -cn --arg m "$encoded" '{decision:"continue",reason:$m}' 2>/dev/null) || { echo "{}"; exit 0; }
+  fm_operational_input_encode turn-end-guard "$body" encoded || exit_nopark "repair-encode-failed"
+  response=$(jq -cn --arg m "$encoded" '{decision:"continue",reason:$m}' 2>/dev/null) || exit_nopark "repair-jq-failed"
 
-  lock_acquire_bounded "$OWNER_LOCK" || { echo "{}"; exit 0; }
+  lock_acquire_bounded "$OWNER_LOCK" || exit_nopark "repair-lock-timeout"
   if ! park_still_ours || ! current_session_still_ours || [ -e "$STATE/.afk" ]; then
     fm_lock_release "$OWNER_LOCK"
-    echo "{}"
-    exit 0
+    exit_nopark "repair-superseded-under-lock"
   fi
   budget_read
   if [ "$BUDGET_COUNT" -ne "$prior" ] || ! budget_write "$count"; then
     fm_lock_release "$OWNER_LOCK"
-    echo "{}"
-    exit 0
+    exit_nopark "repair-budget-write-failed"
   fi
   printf '%s\n' "$response" || true
   fm_lock_release "$OWNER_LOCK"
   exit 0
 }
 
-PARK_SEQ=
-claim_park || { echo "{}"; exit 0; }
+claim_park || exit_nopark "claim-park-failed"
 
 if [ "$EXECUTION_NUM" -ge "$LOOP_CEILING" ]; then
-  [ "$EXECUTION_NUM" -eq "$LOOP_CEILING" ] || { echo "{}"; exit 0; }
+  if [ "$EXECUTION_NUM" -ne "$LOOP_CEILING" ]; then
+    sync_history_cursor
+    exit_nopark "loop-ceiling-exceeded" "execution_num=$EXECUTION_NUM ceiling=$LOOP_CEILING"
+  fi
   if fm_supervision_needed "$STATE" "$GRACE"; then
     emit_continue turn-end-guard "FIRSTMATE SUPERVISION FOLLOW-UP CEILING REACHED - this session has taken $EXECUTION_NUM consecutive hook-driven turns without a captain message, so automatic wake delivery stops here to bound the loop. Queued wakes stay durable: run bin/fm-wake-drain.sh, handle them, and run its exact WAKE_ACK_REQUIRED command. Supervision resumes automatically at the next turn end after the captain's next message."
   else
-    echo "{}"
-    exit 0
+    sync_history_cursor
+    exit_nopark "loop-ceiling-idle" "execution_num=$EXECUTION_NUM"
   fi
 fi
 
 # Away mode owns the watcher and its own triage; never park and never continue here.
-[ -e "$STATE/.afk" ] && { echo "{}"; exit 0; }
+if [ -e "$STATE/.afk" ]; then
+  sync_history_cursor
+  exit_nopark "afk-active"
+fi
 
 if ! fm_supervision_needed "$STATE" "$GRACE"; then
+  sync_history_cursor
   budget_reset_if_ours
-  echo "{}"
-  exit 0
+  exit_nopark "supervision-not-needed"
+fi
+
+# Yield park while Antigravity background tasks or subagents are still running,
+# so their completion <SYSTEM_MESSAGE> can be dequeued immediately.
+if agy_not_fully_idle; then
+  sync_history_cursor
+  exit_nopark "not-fully-idle" "fully_idle=$FULLY_IDLE term=$TERMINATION_REASON"
 fi
 
 # shellcheck source=/dev/null
@@ -319,6 +460,7 @@ ARM_PID=
 ACTIONABLE=0
 HEALTHY=0
 STAND_DOWN=0
+STAND_DOWN_REASON=none
 HOST_MODE=0
 HOST_RC=0
 ACTIONABLE_RE='^(signal:|stale:|check:|heartbeat($|:))'
@@ -329,45 +471,26 @@ fi
 
 trap '[ -n "$ARM_PID" ] && kill "$ARM_PID" 2>/dev/null; [ -n "$ARM_OUT" ] && rm -f "$ARM_OUT" 2>/dev/null; :' EXIT
 
-AGY_HISTORY_FILE="${FM_AGY_HISTORY_FILE:-${HOME:-}/.gemini/antigravity-cli/history.jsonl}"
-CURSOR_FILE="$STATE/.agy-history-line"
-LAST_PROCESSED_LINE=$(cat "$CURSOR_FILE" 2>/dev/null || echo 0)
-case "$LAST_PROCESSED_LINE" in ''|*[!0-9]*) LAST_PROCESSED_LINE=0 ;; esac
-
-agy_history_count() {
-  local file=$1 sid=$2 count=0
-  [ -f "$file" ] || { echo 0; return 0; }
-  if [ -n "$sid" ] && [ "$sid" != unknown ]; then
-    count=$(grep -c "\"conversationId\":\"$sid\"" "$file" 2>/dev/null || true)
-  else
-    count=$(wc -l < "$file" 2>/dev/null || true)
-  fi
-  case "$count" in ''|*[!0-9]*) count=0 ;; esac
-  echo "$count"
-}
-
-INITIAL_HISTORY_LINES=$(agy_history_count "$AGY_HISTORY_FILE" "$SESSION_ID")
-INITIAL_HISTORY_LINES=$((INITIAL_HISTORY_LINES + 0))
-
 # Detect messages queued during this turn
 if [ "$LAST_PROCESSED_LINE" -gt 0 ] && [ "$INITIAL_HISTORY_LINES" -gt "$((LAST_PROCESSED_LINE + 1))" ]; then
-  printf '%s\n' "$((LAST_PROCESSED_LINE + 1))" > "$CURSOR_FILE" 2>/dev/null || true
-  echo "{}"
-  exit 0
+  if agy_queued_message_confirmed; then
+    sync_history_cursor "$((INITIAL_HISTORY_LINES - 1))"
+    exit_nopark "queued-user-message" "last=$LAST_PROCESSED_LINE initial=$INITIAL_HISTORY_LINES"
+  fi
 fi
 
 if [ -n "${HERDR_PANE_ID:-}" ] && command -v herdr >/dev/null 2>&1; then
-  if herdr --session "${HERDR_SESSION:-main}" pane read "$HERDR_PANE_ID" --lines 10 2>/dev/null | grep -q "queued messages"; then
-    echo "{}"
-    exit 0
+  if herdr --session "${HERDR_SESSION:-main}" pane read "$HERDR_PANE_ID" --source visible 2>/dev/null | grep -q "queued messages"; then
+    sync_history_cursor
+    exit_nopark "herdr-queued-messages"
   fi
 fi
 
-printf '%s\n' "$INITIAL_HISTORY_LINES" > "$CURSOR_FILE" 2>/dev/null || true
+sync_history_cursor "$INITIAL_HISTORY_LINES"
 
 attempt=0
 while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
-  current_session_still_ours || { echo "{}"; exit 0; }
+  current_session_still_ours || exit_nopark "session-lost-before-arm" "attempt=$((attempt + 1))"
   attempt=$((attempt + 1))
   ARM_OUT=$(mktemp "$STATE/.agy-park-output.XXXXXX") || ARM_OUT=
   if [ "$HOST_MODE" -eq 1 ]; then
@@ -379,37 +502,56 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
   fi
   ARM_PID=$!
   while kill -0 "$ARM_PID" 2>/dev/null; do
-    if ! park_still_ours || ! current_session_still_ours || [ -e "$STATE/.afk" ]; then
+    if ! park_still_ours; then
       STAND_DOWN=1
+      STAND_DOWN_REASON="park-superseded"
+      break
+    fi
+    if ! current_session_still_ours; then
+      STAND_DOWN=1
+      STAND_DOWN_REASON="session-superseded"
+      break
+    fi
+    if [ -e "$STATE/.afk" ]; then
+      STAND_DOWN=1
+      STAND_DOWN_REASON="afk-entered"
+      break
+    fi
+    if ! fm_supervision_needed "$STATE" "$GRACE"; then
+      STAND_DOWN=1
+      STAND_DOWN_REASON="supervision-ended"
       break
     fi
     if [ -f "$AGY_HISTORY_FILE" ]; then
       current_history_lines=$(agy_history_count "$AGY_HISTORY_FILE" "$SESSION_ID")
       if [ "$((current_history_lines + 0))" -gt "$INITIAL_HISTORY_LINES" ]; then
+        sync_history_cursor "$((current_history_lines - 1))"
         STAND_DOWN=1
+        STAND_DOWN_REASON="user-message-history:${INITIAL_HISTORY_LINES}->${current_history_lines}"
         break
       fi
     fi
     if [ -n "${HERDR_PANE_ID:-}" ] && command -v herdr >/dev/null 2>&1; then
-      if herdr --session "${HERDR_SESSION:-main}" pane read "$HERDR_PANE_ID" --lines 10 2>/dev/null | grep -q "queued messages"; then
+      if herdr --session "${HERDR_SESSION:-main}" pane read "$HERDR_PANE_ID" --source visible 2>/dev/null | grep -q "queued messages"; then
         STAND_DOWN=1
+        STAND_DOWN_REASON="user-message-herdr"
         break
       fi
     fi
     sleep 0.5
   done
   if [ "$STAND_DOWN" -eq 1 ]; then
-    kill "$ARM_PID" 2>/dev/null
+    kill "$ARM_PID" 2>/dev/null || true
+    wait "$ARM_PID" 2>/dev/null || true
     ARM_PID=
-    echo "{}"
-    exit 0
+    exit_nopark "stand-down" "reason=$STAND_DOWN_REASON"
   fi
   HOST_RC=0
   wait "$ARM_PID" 2>/dev/null || HOST_RC=$?
   ARM_PID=
 
   # Away mode may have been entered while parked: the daemon owns triage now.
-  [ -e "$STATE/.afk" ] && { echo "{}"; exit 0; }
+  [ -e "$STATE/.afk" ] && exit_nopark "afk-after-arm"
 
   ACTIONABLE=0
   if [ -n "$ARM_OUT" ]; then
@@ -419,8 +561,7 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
 
   if [ "$HOST_MODE" -eq 1 ]; then
     if [ -n "$ARM_OUT" ] && grep -q '^supervision-host stood down:' "$ARM_OUT" 2>/dev/null; then
-      echo "{}"
-      exit 0
+      exit_nopark "supervision-host-stood-down"
     fi
     if [ "$HOST_RC" -gt 128 ] || [ -z "$ARM_OUT" ] || [ ! -s "$ARM_OUT" ]; then
       [ "$attempt" -lt "$ARM_ATTEMPTS" ] || break
@@ -443,8 +584,7 @@ done
 
 if ! fm_supervision_needed "$STATE" "$GRACE"; then
   budget_reset_if_ours
-  echo "{}"
-  exit 0
+  exit_nopark "supervision-not-needed-after-arm"
 fi
 
 if [ "$ACTIONABLE" -eq 1 ]; then
@@ -461,17 +601,16 @@ fi
 
 if [ "$HEALTHY" -eq 1 ]; then
   budget_reset_if_ours
-  echo "{}"
-  exit 0
+  exit_nopark "healthy-watcher-already-running"
 fi
 
 # If watcher still could not be established, invoke shared turn-end guard for repair instruction
-GUARD_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-turnend-agy.XXXXXX") || { echo "{}"; exit 0; }
+GUARD_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-turnend-agy.XXXXXX") || exit_nopark "guard-mktemp-failed"
 printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-turnend-guard.sh" --agy 2>"$GUARD_ERR"
 GUARD_RC=$?
 REASON=$(cat "$GUARD_ERR" 2>/dev/null || true)
 rm -f "$GUARD_ERR" 2>/dev/null || true
-[ "$GUARD_RC" -eq 2 ] || { echo "{}"; exit 0; }
+[ "$GUARD_RC" -eq 2 ] || exit_nopark "turnend-guard-allow" "rc=$GUARD_RC"
 
 [ -n "$REASON" ] || REASON='tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn'
 ARM_TAIL=
