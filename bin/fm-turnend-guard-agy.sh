@@ -254,10 +254,10 @@ agy_not_fully_idle() {
   if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
     local open_tasks
     open_tasks=$(tail -n 100 "$TRANSCRIPT_PATH" 2>/dev/null | jq -r '
-      if .type == "GENERIC" and (.content // "" | test("Tool is running as a background task with task id: ")) then
-        "OPEN:" + ((.content | capture("task id: (?<id>[^\\n\\r ]+)").id) // "")
-      elif .type == "SYSTEM_MESSAGE" and (.content // "" | test("sender=[^\\n\\r ]+")) then
-        "DONE:" + ((.content | capture("sender=(?<id>[^\\n\\r ]+)").id) // "")
+      if .type == "GENERIC" and (.content // "" | test("(^|\\n)Tool is running as a background task with task id: [A-Za-z0-9._-]+/task-[0-9]+")) then
+        "OPEN:" + ((.content | capture("Tool is running as a background task with task id: (?<id>[A-Za-z0-9._-]+/task-[0-9]+)").id) // "")
+      elif .type == "SYSTEM_MESSAGE" and (.content // "" | test("sender=[A-Za-z0-9._-]+/task-[0-9]+")) then
+        "DONE:" + ((.content | capture("sender=(?<id>[A-Za-z0-9._-]+/task-[0-9]+)").id) // "")
       else empty end
     ' 2>/dev/null | awk -F: '
       $1 == "OPEN" && $2 != "" { open[$2] = 1 }
