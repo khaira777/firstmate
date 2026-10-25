@@ -133,7 +133,7 @@ $ herdr agent get w2:p1 --session fm-lab-firstmate-agy-ad-1599574-8823
 
 Herdr tracks agy natively (`antigravity-cli` integration, detected as `agent=agy`), so `fm_backend_herdr_pane_agent_state` returns `live` for every registered agy status and no exit-detection hardening was needed.
 The tmux adapter classifies the anchored process name `agy` as `agent` through the shared name vocabulary in `bin/fm-agent-process-lib.sh`, the muse/omp precedent for short bare-word names.
-agy stays out of the session-lock name vocabulary in `bin/fm-session-lock-lib.sh`, where the other crewmate-only adapters are also absent.
+This worker-only evidence predates the primary and secondmate supervisor integration; [`agy-supervisor.md`](agy-supervisor.md) owns the current session-lock behavior.
 
 ## Composer: unknown by design
 
@@ -158,7 +158,7 @@ No automatic quota failover was exercised or claimed; every handoff above was an
 The unauthenticated failure mode was never observed; this host's agy runs signed in, so any auth prompt is a fail-loud credential blocker, not a handled dialog.
 No slash-skill invocation form was verified, so skill invocation stays natural language.
 `--continue` and `--conversation` resume were never exercised; recovery uses deterministic relaunch from the brief on disk.
-No primary or secondmate behavior was built or tested, and none is claimed.
+Primary and secondmate supervision is documented and tested separately in [`agy-supervisor.md`](agy-supervisor.md).
 
 ## Refreshing this record
 

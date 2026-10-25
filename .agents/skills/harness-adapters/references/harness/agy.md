@@ -1,8 +1,8 @@
 # Antigravity CLI
 
 Antigravity's `agy` TUI, verified end to end on 2026-09-10 with agy 1.2.0 on Linux through the Herdr backend.
-Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` refuses a secondmate launch on it because `../../../../../docs/supervision-protocols/` carries no agy wake protocol.
-`../../../../../docs/verification/agy.md` owns how every fact below was established and what is still unproven.
+AGY is verified for crewmate and scout launches and for primary and secondmate supervision.
+`../../../../../docs/verification/agy.md` owns the worker evidence below, while `../../../../../docs/verification/agy-supervisor.md` owns the supervisor integration evidence.
 
 ## Operating facts
 
@@ -40,7 +40,7 @@ The unauthenticated failure mode was not observed, so treat any auth prompt or r
 
 Detected by ancestry alone: `../../../../../bin/fm-harness.sh` matches the anchored process name `agy`, never `*agy*`.
 No environment marker is promoted: `AGENT=1` observed on a live TUI is an inherited launcher value, not an agy identity, and agy does not clear an inherited `CLAUDECODE` - but a structural agy ancestor now outranks that retained marker, which `../../../../../bin/fm-harness.sh` decides without depending on the spawn's own launch-boundary marker clearing.
-agy is deliberately absent from the session-lock name vocabulary in `../../../../../bin/fm-session-lock-lib.sh`, where muse, gemini, and rovo are also absent: a crewmate-only adapter must never own a home session lock.
+AGY is present in the session-lock name vocabulary for primary and secondmate supervision, as verified in `../../../../../docs/verification/agy-supervisor.md`; crewmate-only muse, gemini, and rovo remain absent.
 
 ## Worker busy state and turn end
 
@@ -48,8 +48,7 @@ agy is deliberately absent from the session-lock name vocabulary in `../../../..
 `fm_busy_agy_tail_busy` matches the pinned `esc to cancel` status row alone, hardcoded with no environment override, and `fm_busy_classify` reports `unknown agy-regex` rather than idle when it is absent, because a long turn can scroll the marker out of the captured tail.
 Teardown removes nothing agy-specific because the spawn leaves nothing behind.
 
-## Primary integration
+## Primary and secondmate supervision
 
-Unsupported and unverified.
-`../../../../../docs/supervision-protocols/` carries no agy protocol, no turn-end guard adapter exists for it, and this adapter verified only the crewmate-side launch, busy state, interrupt, and exit.
-`references/common/primary-hooks.md`'s unsupported-boundary rule applies: never invent a wake protocol from a similar TUI.
+AGY's primary turn-end protocol, pre-tool seatbelt, session-lock ownership, and secondmate launch path are verified in `../../../../../docs/verification/agy-supervisor.md`.
+This reference continues to own the crewmate and scout launch behavior above.
