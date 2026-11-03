@@ -63,7 +63,7 @@ install_scripts() {
            fm-cursor-lib.sh fm-gemini-lib.sh fm-operational-input.sh \
            fm-supervision-instructions.sh fm-harness.sh fm-lock.sh \
            fm-lease-lib.sh fm-guard.sh \
-           fm-supervision-engine-lib.sh fm-control-lib.sh fm-path-lib.sh; do
+           fm-supervision-engine-lib.sh fm-control-lib.sh fm-path-lib.sh fm-hermes-process-lib.sh; do
     [ -f "$ROOT/bin/$f" ] && cp "$ROOT/bin/$f" "$dir/bin/$f"
   done
   cp "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/fm-arm-command-policy.mjs"

@@ -40,6 +40,7 @@
 # Grok consumes the stdout decision object.
 # OpenCode and Pi consume exit 2 plus stderr.
 # Cursor consumes the stdout decision object.
+# Antigravity (agy) consumes the stdout decision object.
 set -u
 
 CMD=""
@@ -54,11 +55,13 @@ usage() {
 Usage: fm-arm-pretool-check.sh [--command <cmd>] [--background true|false] [--claude|--cursor|--agy]
 
 With no --command, reads a PreToolUse-style JSON payload on stdin (Grok
-toolInput.command, Antigravity toolCall.args.CommandLine, or Claude/Codex/Cursor tool_input.command).
+toolInput.command, Antigravity toolCall.args.CommandLine/command, or
+Claude/Codex/Cursor tool_input.command).
 Exits 0 to allow and 2 to deny.
 The deny reason is written to stderr, with a Grok decision object on stdout
 unless --claude is supplied.
-With --cursor, a deny is Cursor's own decision object on stdout and exit 0.
+With --cursor, a deny is Cursor's own decision object on stdout and exit 0,
+because Cursor reads the returned object rather than the exit status.
 With --agy, a deny is Antigravity's decision object on stdout and exit 0.
 Malformed transport and an unavailable classifier runtime fail open.
 EOF
@@ -122,7 +125,7 @@ if [ "$CMD_SET" -eq 0 ]; then
   if [ "$CURSOR_MODE" -eq 0 ] && [ "$AGY_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
     exit 0
   fi
-  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolCall.args.CommandLine // .toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
+  CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolCall.args.CommandLine // .toolCall.args.command // .toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
   [ -n "$CMD" ] || exit 0
   # Kept for transport parity only.
   # shellcheck disable=SC2034
@@ -201,7 +204,11 @@ if [ "$CURSOR_MODE" -eq 1 ]; then
   exit 0
 fi
 if [ "$AGY_MODE" -eq 1 ]; then
-  printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+  if command -v jq >/dev/null 2>&1; then
+    jq -cn --arg r "$DETAIL" '{decision:"deny",reason:$r}'
+  else
+    printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
+  fi
   exit 0
 fi
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2

@@ -18,7 +18,7 @@
 # On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
 # on Pi, the ordinary supervision session keeps running in both postures, and
 # `start` refuses on those harnesses. The same holds for away mode (not quiet
-# mode) on a claude, cursor, opencode, omp, grok, or codex primary whose home
+# mode) on a claude, cursor, opencode, omp, grok, codex, or agy primary whose home
 # runs the supervision host (fm_supervision_host_enabled: by default on
 # Claude, by config/supervision-host elsewhere), where the host runs the away
 # session; `enter` there adds one line when the host has no
@@ -103,7 +103,7 @@
 # Supported backends: herdr, tmux, and rex for `start`; t3code only through
 # `start-native` (T3 hosts no terminal to create, so the daemon runs as the
 # captain's own tracked background job, which means a Codex captain on t3code
-# has no away mode). Others (zellij, orca, cmux, paseo) have no verified
+# has no away mode). Others (zellij, orca, cmux, paseo, tern) have no verified
 # non-visible-launch primitive here yet and refuse loudly. On rex the daemon
 # runs in a dedicated Rex session of its own, so the captain's session gains no
 # tab and keeps its focus.
@@ -238,7 +238,7 @@ fm_afk_launch_primary_harness() {
 # home runs it (docs/supervision-host.md).
 fm_afk_launch_host_primary() {  # <harness>
   case "$1" in
-    claude|cursor|opencode|omp|grok|codex) return 0 ;;
+    claude|cursor|opencode|omp|grok|codex|agy) return 0 ;;
   esac
   return 1
 }
